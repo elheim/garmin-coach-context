@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Personal data — never commit
+athlete_docs/
+training_context.md
+config.yaml
+
+# Runtime data
+data/
+
+.DS_Store
