@@ -346,7 +346,6 @@ def sync_health(db: Database, lookback_days: int = 14, max_workers: int = 4, sil
     db.log_sync("health", count)
     return count
 
-
 def get_recent_activities(lookback_days: int = 90, limit: int = 14) -> list[Activity]:
     """Fetch recent activities directly from Garmin API without storing in DB."""
     raw_activities = _fetch_raw_activities(lookback_days)
@@ -361,6 +360,31 @@ def get_health_metrics(lookback_days: int = 14, max_workers: int = 4) -> list[He
     metrics_list = _fetch_health_metrics_list(lookback_days, max_workers)
     return sorted(metrics_list, key=lambda m: m.metric_date, reverse=True)
 
+def get_perf_stats() -> dict | None:
+    return {
+        "cycling_ftp": get_cycling_ftp(),
+        "lactate_threshold": get_lactate_threshold(),
+    }
+
+
+def get_cycling_ftp() -> dict | None:
+    """Fetch latest cycling FTP data from Garmin Connect."""
+    client = _get_client()
+    try:
+        return client.get_cycling_ftp()
+    except Exception as e:
+        logger.warning(f"Failed to fetch cycling FTP: {e}")
+        return None
+
+
+def get_lactate_threshold() -> dict | None:
+    """Fetch latest lactate threshold data from Garmin Connect."""
+    client = _get_client()
+    try:
+        return client.get_lactate_threshold()
+    except Exception as e:
+        logger.warning(f"Failed to fetch lactate threshold: {e}")
+        return None
 
 def register_tools(mcp):
     @mcp.tool()

@@ -218,6 +218,11 @@ def build_health_trends(health: list[HealthMetrics]) -> str:
         for flag in flags:
             lines.append(f"- ⚠ {flag}")
 
+    # Weight
+    weight_vals = [h.weight_kg for h in week if h.weight_kg]
+    if weight_vals:
+        lines.append(f"- **Weight (7d avg)**: {sum(weight_vals) / len(weight_vals):.1f} kg")
+
     return "\n".join(lines) if lines else "No health trends available."
 
 
@@ -252,6 +257,32 @@ def _detect_fatigue_flags(health: list[HealthMetrics]) -> list[str]:
 
     return flags
 
+def build_perf_stats(perf_stats: dict | None) -> str:
+    if not perf_stats:
+        return "No performance metrics available."
+    # destructure
+    cycling_ftp = perf_stats.get("cycling_ftp")
+    lactate_threshold = perf_stats.get("lactate_threshold")
+    est_weight_kg = lactate_threshold.get('power').get('weight') if lactate_threshold and lactate_threshold.get('power') else None
+    lines = []
+    if cycling_ftp:
+        # append calendarDate, sport, functionalThresholdPower
+        ftp = cycling_ftp.get("functionalThresholdPower", "N/A")
+        calendar_date = cycling_ftp.get("calendarDate", "unknown") 
+        wkg = f"{ftp / est_weight_kg:.2f} W/kg" if est_weight_kg else "N/A W/kg"
+        lines.append(f"- **Cycling FTP**: {ftp}W ({wkg}, as of {calendar_date})")
+
+    if lactate_threshold:
+        speed_and_heart_rate = lactate_threshold.get("speed_and_heart_rate", {})
+        calendar_date = speed_and_heart_rate.get("calendarDate", "unknown")
+        raw_speed = speed_and_heart_rate.get("speed") # dekameters per second
+        mps_speed = raw_speed * 10 if raw_speed else None
+        pace_sec_per_mi = mps_speed and 1609.34 / mps_speed
+        pace_time_per_mi = pace_sec_per_mi and f"{int(pace_sec_per_mi // 60)}:{int((pace_sec_per_mi % 60)):02d}/mi"
+        lines.append(f"- **Lactate Threshold**: {pace_time_per_mi} (as of {calendar_date})")
+
+    return "\n".join(lines)
+
 def build_context(output_path: Path | None = None, use_db: bool = True) -> Path:
     """Build training context from either Garmin API or local database.
     
@@ -282,6 +313,9 @@ def _build_context_md(use_db: bool = True) -> str:
         weeks = build_weekly_summaries(activities)
         data_source = "Live data from Garmin Connect"
 
+    from .garmin_client import get_perf_stats
+    perf_stats = get_perf_stats()
+
     today = date.today().isoformat()
     sections = [
         f"# Training Context — {today}\n",
@@ -291,6 +325,7 @@ def _build_context_md(use_db: bool = True) -> str:
         _section("Training Load Analysis", build_training_load(weeks)),
         _section("Recent Activities (last 14)", build_recent_activities(activities)),
         _section("Health & Recovery Trends", build_health_trends(health)),
+        _section("Performance Stats", build_perf_stats(perf_stats))
     ]
 
     # Append reference to detailed athlete docs if they exist
