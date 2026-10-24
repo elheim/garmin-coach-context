@@ -10,14 +10,19 @@ build/
 venv/
 env/
 
-# Personal MCP config (absolute local paths) — share .mcp.json.example instead
-.mcp.json
-
 # Personal data — never commit
-*.pdf
 athlete_docs/
 training_context.md
 config.yaml
+
+# Personal MCP config (absolute local paths) — share .mcp.json.example instead
+.mcp.json
+
+# Generated documents (plans, reports)
+*.pdf
+
+# Local Claude Code settings
+.claude/settings.local.json
 
 # Runtime data
 data/
