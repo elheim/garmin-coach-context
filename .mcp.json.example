@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "coach": {
+      "command": "/ABSOLUTE/PATH/TO/personal-ai-coach/.venv/bin/coach-mcp",
+      "args": [],
+      "cwd": "/ABSOLUTE/PATH/TO/personal-ai-coach"
+    }
+  }
+}
