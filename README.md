@@ -27,8 +27,8 @@ Garmin Connect ──▶ coach sync ──▶ SQLite DB ──▶ coach context 
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/personal-ai-coach.git
-cd personal-ai-coach
+git clone https://github.com/YOUR_USERNAME/garmin-coach-context.git
+cd garmin-coach-context
 
 # Create virtual environment and install
 python3 -m venv .venv
@@ -141,11 +141,24 @@ This project supports the Model Context Protocol (MCP) for seamless context inje
 
 2. **Sync the project:**
 
-  ```bash
-  uv sync
-  ```
+   ```bash
+   uv sync
+   ```
 
 3. **Start the MCP server:**
+
+   ```bash
+   uv run coach-mcp
+   ```
+
+### MCP Tools
+
+| Tool | What it does |
+|------|--------------|
+| `get_coach_context` | Weekly load, recent activities, health trends, fatigue flags (from the local DB) |
+| `sync_garmin_data` | Pull new data from Garmin Connect (at most once per hour) |
+| `get_athlete_docs` | Return everything in `athlete_docs/` (race targets, fueling, injuries) |
+| `get_profile` / `save_profile` | Read / update the athlete profile; used for first-run onboarding |
 
 ### Claude Desktop Integration
 
@@ -170,6 +183,14 @@ Add to your Claude Desktop MCP settings:
   }
 }
 ```
+
+> **No `uv` installed?** Apps don't see your shell's PATH, so a bare `uv` command fails with `ENOENT`. Point at the virtualenv binary with an absolute path instead (see `.mcp.json.example` for Claude Code):
+>
+> ```JSON
+> { "mcpServers": { "garmin-coach-context": { "command": "<full path to repo>/.venv/bin/coach-mcp", "args": [], "cwd": "<full path to repo>" } } }
+> ```
+>
+> Keep `cwd` — `get_athlete_docs` looks for `athlete_docs/` relative to the working directory.
 
 To use the MCP server with Claude Desktop:
 
@@ -208,6 +229,8 @@ garmin-coach-context/
     personal_ai_coach.egg-info/ # Packaging metadata
   athlete_docs/             # Your personal coaching context (gitignored)
   .cursor/rules/            # Cursor AI coaching rule (for Cursor editor)
+  .cursor/mcp.json          # Cursor MCP config (relative paths)
+  .mcp.json.example         # Claude Code MCP config template (copy to .mcp.json, gitignored)
   training_context.md       # Auto-generated context for AI (gitignored)
   config.example.yaml       # Example configuration
   plan.md                   # Example training plan (optional)
