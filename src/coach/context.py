@@ -311,7 +311,21 @@ def _build_context_md(use_db: bool = True) -> str:
 def register_tools(mcp):
     @mcp.tool()
     def get_coach_context() -> str:
-        """Fetch training context data (activities, health metrics) from Garmin Connect."""
+        """Get current training data: weekly load, recent activities, health trends, fatigue flags."""
         return _build_context_md(use_db=True)
-    
+
+    @mcp.tool()
+    def get_athlete_docs() -> str:
+        """Get full athlete documentation: race targets, fueling strategy, gear, injury history, coaching guidelines. Call this for deep strategy questions."""
+        athlete_docs = Path("athlete_docs")
+        if not athlete_docs.is_dir():
+            return "No athlete documentation found. Add markdown files to the athlete_docs/ directory."
+        docs = sorted(athlete_docs.glob("*.md"))
+        if not docs:
+            return "athlete_docs/ directory exists but contains no markdown files."
+        sections = []
+        for doc in docs:
+            sections.append(f"# {doc.stem}\n\n{doc.read_text(encoding='utf-8')}")
+        return "\n\n---\n\n".join(sections)
+
     return mcp
