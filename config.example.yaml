@@ -2,8 +2,10 @@
 # Run: coach login
 
 athlete:
-  race_date: "2026-09-13"
-  race_name: "Ironman Wisconsin"
+  sport: "triathlon"            # running, cycling, triathlon
+  race_distance: "ironman"      # 5K, 10K, half_marathon, marathon, sprint, olympic, 70.3, ironman
+  race_date: "2027-09-12"
+  race_name: "Your Goal Race"
   experience: "first_timer"
   max_weekly_hours: 12.0
   injury_history: []
