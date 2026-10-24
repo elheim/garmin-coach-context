@@ -10,7 +10,11 @@ build/
 venv/
 env/
 
+# Personal MCP config (absolute local paths) — share .mcp.json.example instead
+.mcp.json
+
 # Personal data — never commit
+*.pdf
 athlete_docs/
 training_context.md
 config.yaml
