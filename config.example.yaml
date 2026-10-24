@@ -11,5 +11,24 @@ athlete:
   injury_history: []
   goals: "Finish strong"
 
+# Used to judge workouts (%FTP per rep, easy-day drift, HR-based TSS).
+# Leave empty to fall back to Garmin's FTP and lactate-threshold HR.
+thresholds:
+  ftp_watts: 230
+  lthr_bike: 165
+  lthr_run: 170
+  easy_hr_cap: 145
+
+coach:
+  tone: "direct"                # direct, supportive, tough
+  units: "metric"               # metric, imperial
+
+# Optional: cycle-aware readiness. Only offered (and asked once) when your Garmin profile is female.
+# Data stays in the local database; "off" deletes it.
+cycle:
+  tracking: "unasked"           # unasked, on, off
+  share_in_context_file: false  # keep cycle details out of training_context.md
+
 sync:
   lookback_days: 90
+  analyze_days: 14              # analyze laps/reps of runs & rides from the last N days
