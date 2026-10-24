@@ -55,6 +55,13 @@ CREATE TABLE IF NOT EXISTS health_metrics (
     body_fat_pct REAL
 );
 
+CREATE TABLE IF NOT EXISTS activity_analysis (
+    activity_id INTEGER PRIMARY KEY,
+    version INTEGER NOT NULL,
+    analyzed_at TEXT NOT NULL,
+    analysis_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sync_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sync_type TEXT NOT NULL,
@@ -74,6 +81,7 @@ class Database:
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(str(self.db_path))
+            self.db_path.chmod(0o600)  # health data: owner-only
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_SCHEMA)
         return self._conn
@@ -180,6 +188,44 @@ class Database:
     def activity_count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) as cnt FROM activities").fetchone()
         return row["cnt"]
+
+    def get_activity(self, activity_id: int) -> Activity | None:
+        row = self.conn.execute(
+            "SELECT * FROM activities WHERE activity_id = ?", (activity_id,)
+        ).fetchone()
+        return self._row_to_activity(row) if row else None
+
+    def find_activities_on(self, day: str) -> list[Activity]:
+        rows = self.conn.execute(
+            "SELECT * FROM activities WHERE substr(start_time, 1, 10) = ? ORDER BY start_time",
+            (day,),
+        ).fetchall()
+        return [self._row_to_activity(r) for r in rows]
+
+    # ── Workout analysis cache ──
+
+    def save_analysis(self, activity_id: int, version: int, analysis: dict) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO activity_analysis (activity_id, version, analyzed_at, analysis_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(activity_id) DO UPDATE SET
+                version=excluded.version,
+                analyzed_at=excluded.analyzed_at,
+                analysis_json=excluded.analysis_json
+            """,
+            (activity_id, version, datetime.now().isoformat(), json.dumps(analysis)),
+        )
+        self.conn.commit()
+
+    def get_analysis(self, activity_id: int, version: int | None = None) -> dict | None:
+        row = self.conn.execute(
+            "SELECT version, analysis_json FROM activity_analysis WHERE activity_id = ?",
+            (activity_id,),
+        ).fetchone()
+        if not row or (version is not None and row["version"] != version):
+            return None
+        return json.loads(row["analysis_json"])
 
     # ── Health Metrics ──
 
