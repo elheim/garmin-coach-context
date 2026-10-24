@@ -20,10 +20,12 @@ KEYRING_PASSWORD_KEY = "garmin_password"
 
 
 class AthleteConfig(BaseModel):
+    sport: str = ""  # running, cycling, triathlon
+    race_distance: str = ""  # 5K, 10K, half_marathon, marathon, sprint, olympic, 70.3, ironman
     race_date: str = ""
     race_name: str = ""
-    experience: str = "first_timer"
-    max_weekly_hours: float = 12.0
+    experience: str = ""
+    max_weekly_hours: float = 0.0
     injury_history: list[str] = Field(default_factory=list)
     goals: str = ""
 
