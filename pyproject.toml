@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "personal-ai-coach"
 version = "0.1.0"
-description = "AI-powered Ironman triathlon coach using Garmin Connect data"
+description = "Personal AI endurance coach (run, bike, swim, triathlon) using Garmin Connect data"
 requires-python = ">=3.11"
 dependencies = [
     "garminconnect",
