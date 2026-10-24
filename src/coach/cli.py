@@ -23,7 +23,7 @@ from .database import Database
 
 app = typer.Typer(
     name="coach",
-    help="Personal AI Ironman Coach — sync Garmin data and generate context for AI coaching in Cursor.",
+    help="Personal AI endurance coach — sync Garmin data, analyze workouts and generate context for AI coaching.",
     no_args_is_help=True,
 )
 console = Console()
@@ -34,9 +34,10 @@ def login(
     password: str = typer.Option(None, prompt="Garmin Connect password", hide_input=True),
 ) -> None:
     """Authenticate with Garmin Connect and save credentials to system keychain."""
-    save_garmin_credentials(email, password)
-
+    from .config import delete_garmin_credentials
     from .garmin_client import _get_client
+
+    save_garmin_credentials(email, password)
 
     try:
         rprint("Authenticating with Garmin Connect...")
@@ -45,21 +46,23 @@ def login(
         rprint("[bold green]Logged in successfully.[/bold green]")
         rprint("Credentials stored in system keychain (macOS Keychain / OS credential store).")
     except Exception as e:
+        delete_garmin_credentials()  # don't keep credentials that don't work
         rprint(f"[bold red]Login failed:[/bold red] {e}")
         raise typer.Exit(1)
 
 
 @app.command()
 def sync(
-    lookback: int = typer.Option(None, "--lookback", "-l", help="Days to look back (default: from config)"),
-    health_days: int = typer.Option(14, "--health-days", help="Days of health data to sync"),
+    lookback: int = typer.Option(None, "--lookback", "-l", help="Days of activities to fetch (default: since last sync; full history from config on first sync)"),
+    health_days: int = typer.Option(None, "--health-days", help="Days of health data to fetch (default: since last sync; 45 on first sync for baselines)"),
 ) -> None:
     """Sync training data from Garmin Connect."""
-    from .garmin_client import sync_activities, sync_health
+    from .garmin_client import analyze_recent, incremental_lookback, sync_activities, sync_cycle, sync_health
 
     cfg = load_config()
-    days = lookback or cfg.sync.lookback_days
     db = Database()
+    days = lookback or incremental_lookback(db, cfg.sync.lookback_days)
+    health_days = health_days or incremental_lookback(db, 45, "health")
 
     try:
         rprint(f"\n[bold]Syncing activities ({days} days)...[/bold]")
@@ -69,6 +72,14 @@ def sync(
         rprint(f"\n[bold]Syncing health metrics ({health_days} days)...[/bold]")
         health_count = sync_health(db, lookback_days=health_days)
         rprint(f"  [green]{health_count}[/green] days of health data synced.")
+        try:
+            sync_cycle(db, lookback_days=health_days)
+        except Exception:
+            pass
+
+        rprint(f"\n[bold]Analyzing runs & rides ({cfg.sync.analyze_days} days)...[/bold]")
+        analyzed = analyze_recent(db, days=cfg.sync.analyze_days)
+        rprint(f"  [green]{analyzed}[/green] new workouts analyzed (laps, reps, pacing).")
 
         rprint(f"\n[bold]Database totals:[/bold] {db.activity_count()} activities, {db.health_count()} health records")
         db.close()
@@ -94,6 +105,41 @@ def context(
     except Exception as e:
         rprint(f"[bold red]Failed to generate context:[/bold red] {e}")
         raise typer.Exit(1)
+
+
+@app.command()
+def analyze(
+    activity_id: int = typer.Argument(None, help="Garmin activity id (default: latest run/ride)"),
+    day: str = typer.Option(None, "--date", "-d", help="Analyze every run/ride on this date (YYYY-MM-DD)"),
+    force: bool = typer.Option(False, "--force", help="Re-fetch from Garmin instead of using the cache"),
+) -> None:
+    """Break down a run or ride: reps, pacing, where you went too hard, stops, drift."""
+    from rich.markdown import Markdown
+
+    from .analysis import classify, render
+    from .garmin_client import analyze_activity
+
+    db = Database()
+    try:
+        if activity_id:
+            a = db.get_activity(activity_id)
+            targets = [a] if a else []
+        elif day:
+            targets = db.find_activities_on(day)
+        else:
+            targets = [x for x in db.get_recent_activities(limit=20)
+                       if classify(x.sport_type or x.activity_type) in ("run", "bike")][:1]
+        shown = 0
+        for a in targets:
+            result = analyze_activity(db, a, force=force)
+            if result:
+                console.print(Markdown(render(result)))
+                console.print()
+                shown += 1
+        if not shown:
+            rprint("[yellow]No run or ride found. Run [bold]coach sync[/bold] first or check the id/date.[/yellow]")
+    finally:
+        db.close()
 
 
 @app.command()
@@ -135,8 +181,9 @@ def status() -> None:
     cfg = load_config()
     db = Database()
     weeks = db.get_weekly_summaries(weeks=8)
-    health = db.get_health_metrics(since_days=14)
+    health = db.get_health_metrics(since_days=60)
     activities = db.get_recent_activities(limit=5)
+    history = db.get_activities(since_days=120)
     db.close()
 
     # Race countdown
@@ -152,9 +199,24 @@ def status() -> None:
         except ValueError:
             pass
 
+    # Readiness today (vs personal baseline) and fitness/fatigue/form
+    from .analysis import Thresholds
+    from .context import build_fitness_form, build_readiness
+
+    if health:
+        line = build_readiness(health).splitlines()[0].replace("**", "")
+        color = "green" if ": GREEN" in line else "yellow" if ": AMBER" in line else "red"
+        rprint(f"\n[bold]Readiness[/bold]\n  [{color}]{line}[/{color}]")
+    if history:
+        t = cfg.thresholds
+        th = Thresholds(ftp_watts=t.ftp_watts, lthr_bike=t.lthr_bike or t.lthr_run, lthr_run=t.lthr_run)
+        rprint("\n[bold]Fitness / Fatigue / Form[/bold]")
+        for line in build_fitness_form(history, th).splitlines()[:2]:
+            rprint("  " + line.lstrip("- ").replace("**", ""))
+
     # Training load
     if weeks:
-        rprint("\n[bold]Training Load[/bold]")
+        rprint("\n[bold]Volume[/bold]")
         if weeks:
             acute = weeks[0].total_hours
             chronic_hours = [w.total_hours for w in weeks[:6]]
@@ -220,6 +282,9 @@ def config() -> None:
         f"[bold]Max weekly hours:[/bold] {cfg.athlete.max_weekly_hours or 'Not set'}\n"
         f"[bold]Goals:[/bold] {cfg.athlete.goals or 'Not set'}\n"
         f"[bold]Injuries:[/bold] {', '.join(cfg.athlete.injury_history) if cfg.athlete.injury_history else 'None'}\n"
+        f"[bold]FTP / LTHR run / LTHR bike / easy HR cap:[/bold] "
+        f"{cfg.thresholds.ftp_watts or '-'} W / {cfg.thresholds.lthr_run or '-'} / {cfg.thresholds.lthr_bike or '-'} / {cfg.thresholds.easy_hr_cap or '-'}\n"
+        f"[bold]Coach tone / units:[/bold] {cfg.coach.tone} / {cfg.coach.units}\n"
         f"\n[dim]Config file: {CONFIG_PATH}[/dim]",
         title="Athlete Configuration",
     ))
@@ -232,6 +297,26 @@ def config() -> None:
         cfg.athlete.experience = typer.prompt("Experience level", default=cfg.athlete.experience)
         cfg.athlete.max_weekly_hours = float(typer.prompt("Max weekly hours", default=str(cfg.athlete.max_weekly_hours)))
         cfg.athlete.goals = typer.prompt("Goals", default=cfg.athlete.goals)
+
+        def _opt_int(label: str, current: int | None) -> int | None:
+            v = typer.prompt(f"{label} (blank = use Garmin/none)", default=str(current or ""), show_default=bool(current))
+            return int(v) if v.strip().isdigit() else None
+
+        cfg.thresholds.ftp_watts = _opt_int("FTP (W)", cfg.thresholds.ftp_watts)
+        cfg.thresholds.lthr_run = _opt_int("Lactate threshold HR, run", cfg.thresholds.lthr_run)
+        cfg.thresholds.lthr_bike = _opt_int("Lactate threshold HR, bike", cfg.thresholds.lthr_bike)
+        cfg.thresholds.easy_hr_cap = _opt_int("Easy HR cap", cfg.thresholds.easy_hr_cap)
+        cfg.coach.tone = typer.prompt("Coach tone (direct/supportive/tough)", default=cfg.coach.tone)
+        cfg.coach.units = typer.prompt("Units (metric/imperial)", default=cfg.coach.units)
+        if cfg.cycle.eligible:
+            on = typer.confirm("Use your Garmin cycle tracking to personalize readiness and coaching? "
+                               "(stays on this computer)", default=cfg.cycle.tracking == "on")
+            cfg.cycle.tracking = "on" if on else "off"
+            if not on:
+                from . import cycle
+                db = Database()
+                cycle.purge(db.conn)
+                db.close()
         save_config(cfg)
         rprint("[bold green]Configuration saved.[/bold green]")
 
