@@ -1,1 +1,1 @@
-"""Personal AI Ironman Coach — sync Garmin data for AI coaching in Cursor."""
+"""Personal AI endurance coach — Garmin sync, workout analysis and coaching context."""
