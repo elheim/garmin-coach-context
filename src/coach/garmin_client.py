@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from garminconnect import Garmin
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
+from .analysis import ANALYSIS_VERSION, Thresholds, analyze, classify
 from .config import SESSION_DIR, get_garmin_credentials
 from .database import Database
 from .models import Activity, HealthMetrics
@@ -17,9 +18,21 @@ _client_instance = None
 
 def _prompt_mfa() -> str:
     """Prompt the user for a Garmin MFA code in the terminal."""
+    import sys
+
     import typer
 
+    if not sys.stdin.isatty():
+        # The MCP server talks over stdin — prompting there would hang it.
+        raise RuntimeError("Garmin needs a new 2FA login. Run `coach login` in a terminal, then retry.")
     return typer.prompt("Enter Garmin MFA/2FA code")
+
+
+def _secure_session_files() -> None:
+    """Garmin OAuth tokens grant account access — keep them readable by the owner only."""
+    SESSION_DIR.chmod(0o700)
+    for f in SESSION_DIR.glob("*"):
+        f.chmod(0o600)
 
 
 def _get_client() -> Garmin:
@@ -35,6 +48,7 @@ def _get_client() -> Garmin:
         except Exception:
             client.login()
             client.garth.dump(token_path)
+        _secure_session_files()
         _client_instance = client
     return _client_instance
 
@@ -169,16 +183,7 @@ def _process_raw_activities(raw_activities: list[dict], limit: int | None = None
     raw_activities = _expand_multisport(raw_activities[:limit])
     for raw in raw_activities:
         try:
-            activity = _parse_activity(raw)
-
-            client = _get_client()
-            hr_zones = _safe_get(
-                client.get_activity_hr_in_timezones, str(activity.activity_id)
-            )
-            if hr_zones:
-                activity.hr_zones = hr_zones
-
-            activities.append(activity)
+            activities.append(_parse_activity(raw))
         except Exception as e:
             logger.warning("Failed to process activity %s: %s", raw.get("activityId"), e)
 
@@ -358,6 +363,15 @@ def _fetch_health_metrics_list(lookback_days: int = 14, max_workers: int = 4, si
     )
 
 
+def incremental_lookback(db: Database, full_days: int, sync_type: str = "activities") -> int:
+    """Days to re-fetch: everything on the first sync, otherwise since the last sync plus a 3-day margin
+    (late uploads, edited activities)."""
+    last = db.get_last_sync_time(sync_type)
+    if not last:
+        return full_days
+    return min(full_days, max(3, (datetime.now() - last).days + 3))
+
+
 def sync_activities(db: Database, lookback_days: int = 90, silent: bool = False) -> int:
     raw_activities = _fetch_raw_activities(lookback_days, silent=silent)
     activities = _process_raw_activities(raw_activities)
@@ -389,6 +403,132 @@ def sync_health(db: Database, lookback_days: int = 14, max_workers: int = 4, sil
     return count
 
 
+# ── Optional cycle awareness (opt-in; see cycle.py for the privacy model) ──
+
+def sync_cycle(db: Database, lookback_days: int = 14) -> None:
+    """Check eligibility once; sync cycle days only when the athlete has opted in."""
+    from . import cycle
+    from .config import load_config, save_config
+
+    cfg = load_config()
+    if cfg.cycle.eligible is None:
+        profile = _safe_get(_get_client().get_user_profile, default={}) or {}
+        gender = ((profile.get("userData") or {}).get("gender") or "").upper()
+        cfg.cycle.eligible = gender == "FEMALE"
+        save_config(cfg)
+    if not cfg.cycle.eligible or cfg.cycle.tracking != "on":
+        return
+
+    client = _get_client()
+    url = getattr(client, "garmin_connect_menstrual_dayview_url", "/periodichealth-service/menstrualcycle/dayview")
+    today = date.today().isoformat()
+    rows = []
+    for offset in range(lookback_days + 1):
+        ds = (date.today() - timedelta(days=offset)).isoformat()
+        params = {"todayDate": today, "includeAnalysis": "true", "skipbm": "true"}
+        try:  # deliberately silent: nothing about this data goes to logs
+            payload = client.connectapi(f"{url}/{ds}", params=params)
+        except Exception:
+            payload = None
+        row = cycle.parse_day(ds, payload)
+        if row:
+            rows.append(row)
+    if rows:
+        cycle.save_days(db.conn, rows)
+
+
+# ── Workout analysis ──
+
+_garmin_thresholds: dict | None = None
+
+
+def _garmin_threshold_fallback() -> dict:
+    """FTP and lactate-threshold HR from Garmin, used only when config.yaml leaves them empty."""
+    global _garmin_thresholds
+    if _garmin_thresholds is None:
+        client = _get_client()
+        ftp = _safe_get(client.get_cycling_ftp, default=None)
+        lt = _safe_get(client.get_lactate_threshold, default=None)
+        ftp = _as_dict(ftp)
+        lt_hr = _as_dict((lt or {}).get("speed_and_heart_rate") if isinstance(lt, dict) else None)
+        _garmin_thresholds = {
+            "ftp": ftp.get("functionalThresholdPower"),
+            "lthr": lt_hr.get("heartRate"),
+        }
+    return _garmin_thresholds
+
+
+def resolve_thresholds() -> Thresholds:
+    from .config import load_config
+
+    cfg = load_config()
+    t = cfg.thresholds
+    ftp, lthr_bike, lthr_run = t.ftp_watts, t.lthr_bike, t.lthr_run
+    if not ftp or not lthr_run:
+        g = _garmin_threshold_fallback()
+        ftp = ftp or g.get("ftp")
+        lthr_run = lthr_run or g.get("lthr")
+    return Thresholds(
+        ftp_watts=ftp,
+        lthr_bike=lthr_bike or lthr_run,
+        lthr_run=lthr_run,
+        easy_hr_cap=t.easy_hr_cap,
+        units=cfg.coach.units,
+    )
+
+
+def _threshold_key(th: Thresholds) -> list:
+    return [th.ftp_watts, th.lthr_bike, th.lthr_run, th.easy_hr_cap, th.units]
+
+
+def analyze_activity(db: Database, activity: Activity, force: bool = False,
+                     thresholds: Thresholds | None = None) -> dict | None:
+    """Lap/rep/pacing analysis of one run or ride, cached in the database."""
+    if classify(activity.sport_type or activity.activity_type) not in ("run", "bike"):
+        return None
+    th = thresholds or resolve_thresholds()
+    if not force:
+        cached = db.get_analysis(activity.activity_id, ANALYSIS_VERSION)
+        if cached and cached.get("th_key") == _threshold_key(th):
+            return cached
+
+    client = _get_client()
+    raw = json.loads(activity.raw_json) if activity.raw_json else {}
+    raw.setdefault("activityId", activity.activity_id)
+    raw.setdefault("activityType", {"typeKey": activity.sport_type})
+    detail = _safe_get(client.get_activity, str(activity.activity_id), default={}) or {}
+    summary_dto = detail.get("summaryDTO") or {}
+    for k in ("directWorkoutRpe", "directWorkoutFeel"):
+        if summary_dto.get(k) is not None:
+            raw[k] = summary_dto[k]
+    splits = _safe_get(client.get_activity_splits, activity.activity_id, default={}) or {}
+    details = _safe_get(client.get_activity_details, activity.activity_id, 20000, default=None)
+
+    result = analyze(raw, splits.get("lapDTOs", []) or [], details, th)
+    result["th_key"] = _threshold_key(th)
+    result["notes"] = activity.description or ""
+    db.save_analysis(activity.activity_id, ANALYSIS_VERSION, result)
+    return result
+
+
+def analyze_recent(db: Database, days: int = 14, silent: bool = False) -> int:
+    """Analyze run and bike sessions from the last `days` days that are not cached yet."""
+    th = resolve_thresholds()
+    count = 0
+    for activity in db.get_activities(since_days=days):
+        if classify(activity.sport_type or activity.activity_type) not in ("run", "bike"):
+            continue
+        cached = db.get_analysis(activity.activity_id, ANALYSIS_VERSION)
+        if cached and cached.get("th_key") == _threshold_key(th):
+            continue
+        try:
+            if analyze_activity(db, activity, force=True, thresholds=th):
+                count += 1
+        except Exception as e:
+            logger.warning("Failed to analyze activity %s: %s", activity.activity_id, e)
+    return count
+
+
 def get_recent_activities(lookback_days: int = 90, limit: int = 14) -> list[Activity]:
     """Fetch recent activities directly from Garmin API without storing in DB."""
     raw_activities = _fetch_raw_activities(lookback_days)
@@ -417,15 +557,53 @@ def register_tools(mcp):
         
         act_count = 0
         if not last_act_sync or (now - last_act_sync) > timedelta(hours=1):
-            act_count = sync_activities(db, lookback_days=90, silent=True)
-        
+            act_count = sync_activities(db, lookback_days=incremental_lookback(db, 90), silent=True)
+
         health_count = 0
         if not last_health_sync or (now - last_health_sync) > timedelta(hours=1):
-            health_count = sync_health(db, lookback_days=90, silent=True)
-        
+            health_count = sync_health(db, lookback_days=incremental_lookback(db, 45, "health"), silent=True)
+
+        from .config import load_config
+        try:
+            sync_cycle(db, lookback_days=14)
+        except Exception:
+            pass
+        analyzed = analyze_recent(db, days=load_config().sync.analyze_days, silent=True)
+
         db.close()
         if act_count == 0 and health_count == 0:
             return "Data is already up to date (last synced less than 1 hour ago)."
-        return f"Synced {act_count} activities and {health_count} health records from Garmin Connect."
-    
+        return (f"Synced {act_count} activities and {health_count} health records from Garmin Connect; "
+                f"analyzed {analyzed} new workouts.")
+
+    @mcp.tool()
+    def analyze_workout(activity_id: int = 0, date: str = "") -> str:
+        """Detailed breakdown of one run or ride: every rep/interval with power, pace, HR and cadence, where the athlete went too hard or faded, stops, surges, decoupling.
+
+        Pass activity_id, or a date (YYYY-MM-DD) to analyze every run/ride that day, or nothing for the most recent run/ride.
+        Use this whenever the athlete asks how a workout went — the weekly context only has summaries.
+        """
+        from .analysis import render
+
+        db = Database()
+        try:
+            if activity_id:
+                a = db.get_activity(activity_id)
+                targets = [a] if a else []
+            elif date:
+                targets = db.find_activities_on(date)
+            else:
+                targets = [x for x in db.get_recent_activities(limit=20)
+                           if classify(x.sport_type or x.activity_type) in ("run", "bike")][:1]
+            out = []
+            for a in targets:
+                result = analyze_activity(db, a)
+                if result:
+                    out.append(render(result))
+            if not out:
+                return "No run or ride found for that request. Sync first or check the activity id/date."
+            return "\n\n".join(out)
+        finally:
+            db.close()
+
     return mcp
