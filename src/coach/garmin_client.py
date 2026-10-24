@@ -116,10 +116,58 @@ def _fetch_raw_activities(lookback_days: int = 90, silent: bool = False) -> list
         return client.get_activities_by_date(start_date, end_date)
 
 
+def _child_to_list_format(detail: dict) -> dict:
+    """Map a get_activity() detail payload onto the list-endpoint shape _parse_activity expects."""
+    s = detail.get("summaryDTO", {}) or {}
+    start = (s.get("startTimeLocal") or "").replace("T", " ").split(".")[0]
+    return {
+        "activityId": detail.get("activityId"),
+        "activityName": detail.get("activityName", ""),
+        "activityType": {"typeKey": (detail.get("activityTypeDTO") or {}).get("typeKey", "")},
+        "startTimeLocal": start or None,
+        "duration": s.get("duration"),
+        "distance": s.get("distance"),
+        "averageHR": s.get("averageHR"),
+        "maxHR": s.get("maxHR"),
+        "calories": s.get("calories"),
+        "averageSpeed": s.get("averageSpeed"),
+        "avgPower": s.get("averagePower"),
+        "normPower": s.get("normalizedPower"),
+        "trainingStressScore": s.get("trainingStressScore"),
+        "aerobicTrainingEffect": s.get("trainingEffect"),
+        "anaerobicTrainingEffect": s.get("anaerobicTrainingEffect"),
+        "elevationGain": s.get("elevationGain"),
+        "averageRunningCadenceInStepsPerMinute": s.get("averageRunCadence"),
+        "averageBikingCadenceInRevPerMinute": s.get("averageBikeCadence"),
+        "description": detail.get("description", ""),
+        "parentId": detail.get("metadataDTO", {}).get("parentId"),
+    }
+
+
+def _expand_multisport(raw_activities: list[dict]) -> list[dict]:
+    """Add the individual legs (swim, T1, bike, T2, run) of multisport activities.
+
+    Garmin's activity list only returns the multisport parent, so without this a
+    triathlon's swim and run never reach the database.
+    """
+    client = _get_client()
+    expanded = list(raw_activities)
+    for raw in raw_activities:
+        if raw.get("activityType", {}).get("typeKey") != "multi_sport":
+            continue
+        parent = _safe_get(client.get_activity, str(raw["activityId"]), default={}) or {}
+        for child_id in (parent.get("metadataDTO", {}) or {}).get("childIds", []) or []:
+            detail = _safe_get(client.get_activity, str(child_id), default=None)
+            if detail:
+                expanded.append(_child_to_list_format(detail))
+    return expanded
+
+
 def _process_raw_activities(raw_activities: list[dict], limit: int | None = None) -> list[Activity]:
     """Convert raw activity data to Activity objects."""
     activities = []
-    for raw in raw_activities[:limit]:
+    raw_activities = _expand_multisport(raw_activities[:limit])
+    for raw in raw_activities:
         try:
             activity = _parse_activity(raw)
 
@@ -152,9 +200,6 @@ def _fetch_health_metrics_for_day(client: Garmin, ds: str) -> HealthMetrics:
     def get_hrv():
         return _as_dict(_safe_get(client.get_hrv_data, ds, default={}))
 
-    def get_body_battery():
-        return _safe_get(client.get_body_battery, ds, default=[])
-
     def get_stress():
         return _as_dict(_safe_get(client.get_stress_data, ds, default={}))
 
@@ -173,7 +218,6 @@ def _fetch_health_metrics_for_day(client: Garmin, ds: str) -> HealthMetrics:
             executor.submit(get_stats): 'stats',
             executor.submit(get_sleep): 'sleep',
             executor.submit(get_hrv): 'hrv',
-            executor.submit(get_body_battery): 'bb',
             executor.submit(get_stress): 'stress',
             executor.submit(get_readiness): 'readiness',
             executor.submit(get_max_metrics): 'max_met',
@@ -193,6 +237,10 @@ def _fetch_health_metrics_for_day(client: Garmin, ds: str) -> HealthMetrics:
     stats = results.get('stats')
     if stats:
         metrics.resting_hr = stats.get("restingHeartRate")
+        # Daily body battery levels (not the charged/drained amounts).
+        metrics.body_battery_high = stats.get("bodyBatteryHighestValue")
+        metrics.body_battery_low = stats.get("bodyBatteryLowestValue")
+        metrics.stress_avg = stats.get("averageStressLevel")
 
     sleep = results.get('sleep')
     if sleep:
@@ -208,19 +256,12 @@ def _fetch_health_metrics_for_day(client: Garmin, ds: str) -> HealthMetrics:
     if hrv:
         summary = _as_dict(hrv.get("hrvSummary", {}))
         metrics.hrv_weekly_avg = summary.get("weeklyAvg")
-        metrics.hrv_last_night = summary.get("lastNight")
+        metrics.hrv_last_night = summary.get("lastNightAvg") or summary.get("lastNight")
         metrics.hrv_status = summary.get("status")
 
-    bb = results.get('bb')
-    if bb is not None:
-        bb_entry = _as_dict(bb)
-        if bb_entry:
-            metrics.body_battery_high = bb_entry.get("charged")
-            metrics.body_battery_low = bb_entry.get("drained")
-
     stress = results.get('stress')
-    if stress:
-        metrics.stress_avg = stress.get("overallStressLevel")
+    if stress and metrics.stress_avg is None:
+        metrics.stress_avg = stress.get("avgStressLevel") or stress.get("overallStressLevel")
 
     readiness = results.get('readiness')
     if readiness:
@@ -297,10 +338,11 @@ def _fetch_health_metrics_list(lookback_days: int = 14, max_workers: int = 4, si
     end = date.today()
     start = end - timedelta(days=lookback_days)
     
-    # Generate all date strings
+    # Generate all date strings, including today (last night's sleep/HRV is
+    # filed under today's date)
     date_strings = [
         (start + timedelta(days=day_offset)).strftime("%Y-%m-%d")
-        for day_offset in range(lookback_days)
+        for day_offset in range(lookback_days + 1)
     ]
     
     def fetch_day_metrics(ds: str) -> HealthMetrics:
@@ -312,7 +354,7 @@ def _fetch_health_metrics_list(lookback_days: int = 14, max_workers: int = 4, si
         max_workers=max_workers,
         silent=silent,
         progress_desc="Fetching health metrics...",
-        item_count=lookback_days
+        item_count=len(date_strings)
     )
 
 
