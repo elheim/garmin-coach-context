@@ -82,7 +82,7 @@ def sync(
 @app.command()
 def context(
     output: Path = typer.Option(None, "--output", "-o", help="Output path (default: training_context.md)"),
-    live: bool = typer.Option(False, "--live", help="Use local database instead of fetching from Garmin API"),
+    live: bool = typer.Option(False, "--live", help="Fetch from Garmin API instead of local database"),
 ) -> None:
     """Generate the training context markdown file for Cursor AI."""
     from .context import build_context
@@ -212,10 +212,12 @@ def config() -> None:
     cfg = load_config()
 
     rprint(Panel(
+        f"[bold]Sport:[/bold] {cfg.athlete.sport or 'Not set'}\n"
+        f"[bold]Race distance:[/bold] {cfg.athlete.race_distance or 'Not set'}\n"
         f"[bold]Race:[/bold] {cfg.athlete.race_name or 'Not set'}\n"
         f"[bold]Date:[/bold] {cfg.athlete.race_date or 'Not set'}\n"
-        f"[bold]Experience:[/bold] {cfg.athlete.experience}\n"
-        f"[bold]Max weekly hours:[/bold] {cfg.athlete.max_weekly_hours}\n"
+        f"[bold]Experience:[/bold] {cfg.athlete.experience or 'Not set'}\n"
+        f"[bold]Max weekly hours:[/bold] {cfg.athlete.max_weekly_hours or 'Not set'}\n"
         f"[bold]Goals:[/bold] {cfg.athlete.goals or 'Not set'}\n"
         f"[bold]Injuries:[/bold] {', '.join(cfg.athlete.injury_history) if cfg.athlete.injury_history else 'None'}\n"
         f"\n[dim]Config file: {CONFIG_PATH}[/dim]",
@@ -223,6 +225,8 @@ def config() -> None:
     ))
 
     if typer.confirm("\nEdit configuration?", default=False):
+        cfg.athlete.sport = typer.prompt("Sport (running/cycling/triathlon)", default=cfg.athlete.sport)
+        cfg.athlete.race_distance = typer.prompt("Race distance (e.g. ironman, 70.3, marathon)", default=cfg.athlete.race_distance)
         cfg.athlete.race_name = typer.prompt("Race name", default=cfg.athlete.race_name)
         cfg.athlete.race_date = typer.prompt("Race date (YYYY-MM-DD)", default=cfg.athlete.race_date)
         cfg.athlete.experience = typer.prompt("Experience level", default=cfg.athlete.experience)
